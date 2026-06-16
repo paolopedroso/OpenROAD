@@ -33,6 +33,8 @@ add_library(par_lib
   src/KWayPMRefine.cpp
   src/PriorityQueue.cpp
   src/ArtNetSpec.cpp
+  src/RetimingSlack.cpp
+  src/RetimingExtract.cpp
 )
 
 target_include_directories(par_lib

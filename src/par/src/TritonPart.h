@@ -140,7 +140,9 @@ class TritonPart
                        float path_snaking_factor,
                        float timing_exp_factor,
                        float extra_delay,
-                       bool guardband_flag);
+                       bool guardband_flag,
+                       bool retiming_aware_flag,
+                       const std::string& retiming_algorithm);
 
   // The cost introduced by a cut hyperedge e is e_wt_factors
   // dot_product hyperedge_weights_[e]. This parameter is used by
@@ -266,6 +268,14 @@ class TritonPart
   std::vector<TimingPath>
       timing_paths_;  // critical timing paths, extracted based OpenSTA
   bool guardband_flag_ = true;  // Turn on the timing guardband option
+  // RTA-Part: when true, BuildTimingPaths sources per-net and per-path slack
+  // from the retiming-aware engine instead of static OpenSTA slack. Default
+  // false preserves existing behavior bit-for-bit.
+  bool retiming_aware_flag_ = false;
+  // RTA-Part: which engine to use. "pan" -> Pan's c-retiming (CTCHECK +
+  // binary search), "l_s" -> classical Leiserson-Saxe (WD + BF). Default
+  // "pan" -- only takes effect when retiming_aware_flag_ is true.
+  std::string retiming_algorithm_ = "pan";
 
   // ---- community information
   // ---- all the vertices in the same community will stay together

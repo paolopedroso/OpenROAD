@@ -416,6 +416,8 @@ sta::define_cmd_args "triton_part_design" { \
     [-timing_exp_factor timing_exp_factor] \
     [-extra_delay extra_delay] \
     [-guardband_flag guardband_flag] \
+    [-retiming_aware_flag retiming_aware_flag] \
+    [-retiming_algorithm retiming_algorithm] \
     [-e_wt_factors e_wt_factors] \
     [-v_wt_factors v_wt_factors] \
     [-placement_wt_factors placement_wt_factors] \
@@ -463,6 +465,8 @@ proc triton_part_design { args } {
           -timing_exp_factor \
           -extra_delay \
           -guardband_flag \
+          -retiming_aware_flag \
+          -retiming_algorithm \
           -e_wt_factors \
           -v_wt_factors \
           -placement_wt_factors \
@@ -513,6 +517,10 @@ proc triton_part_design { args } {
   set timing_exp_factor 1.0
   set extra_delay 1e-9
   set guardband_flag false
+  # RTA-Part is opt-in; default off preserves existing partitioning behavior.
+  set retiming_aware_flag false
+  # Default engine is Pan c-retiming; "l_s" selects Leiserson-Saxe instead.
+  set retiming_algorithm "pan"
   set e_wt_factors { 1.0 }
   set v_wt_factors { 1.0 }
   set placement_wt_factors { }
@@ -619,6 +627,14 @@ proc triton_part_design { args } {
 
   if { [info exists keys(-guardband_flag)] } {
     set guardband_flag $keys(-guardband_flag)
+  }
+
+  if { [info exists keys(-retiming_aware_flag)] } {
+    set retiming_aware_flag $keys(-retiming_aware_flag)
+  }
+
+  if { [info exists keys(-retiming_algorithm)] } {
+    set retiming_algorithm $keys(-retiming_algorithm)
   }
 
   if { [info exists keys(-e_wt_factors)] } {
@@ -728,6 +744,8 @@ proc triton_part_design { args } {
     $timing_exp_factor \
     $extra_delay \
     $guardband_flag \
+    $retiming_aware_flag \
+    $retiming_algorithm \
     $e_wt_factors \
     $v_wt_factors \
     $placement_wt_factors \

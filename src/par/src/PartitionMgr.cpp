@@ -251,6 +251,8 @@ void PartitionMgr::tritonPartDesign(
     float timing_exp_factor,
     float extra_delay,
     bool guardband_flag,
+    bool retiming_aware_flag,
+    const std::string& retiming_algorithm,
     // weight parameters
     const std::vector<float>& e_wt_factors,
     const std::vector<float>& v_wt_factors,
@@ -289,7 +291,9 @@ void PartitionMgr::tritonPartDesign(
                                path_snaking_factor,
                                timing_exp_factor,
                                extra_delay,
-                               guardband_flag);
+                               guardband_flag,
+                               retiming_aware_flag,
+                               retiming_algorithm);
   triton_part->SetFineTuneParams(  // coarsening related parameters
       thr_coarsen_hyperedge_size_skip,
       thr_coarsen_vertices,
@@ -376,12 +380,17 @@ void PartitionMgr::evaluatePartDesignSolution(
   triton_part->SetVertexWeight(v_wt_factors);
   std::vector<float> placement_wt_factors;
   triton_part->SetPlacementWeight(placement_wt_factors);
+  // evaluatePartDesignSolution operates on a pre-supplied hypergraph file
+  // (no live netlist), so RTA-Part has nothing to retime here -- pass
+  // false unconditionally.
   triton_part->SetTimingParams(net_timing_factor,
                                path_timing_factor,
                                path_snaking_factor,
                                timing_exp_factor,
                                extra_delay,
-                               guardband_flag);
+                               guardband_flag,
+                               /*retiming_aware_flag=*/false,
+                               /*retiming_algorithm=*/"pan");
 
   triton_part->EvaluatePartDesignSolution(num_parts_arg,
                                           balance_constraint_arg,

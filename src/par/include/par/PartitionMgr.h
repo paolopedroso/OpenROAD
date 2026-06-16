@@ -170,6 +170,13 @@ class PartitionMgr
                         float timing_exp_factor,
                         float extra_delay,
                         bool guardband_flag,
+                        // RTA-Part opt-in: source per-net/per-path slack from
+                        // the retiming-aware engine instead of static STA.
+                        // Default false at every layer above.
+                        bool retiming_aware_flag,
+                        // RTA-Part engine selector: "pan" (default) or "l_s".
+                        // Ignored unless retiming_aware_flag is true.
+                        const std::string& retiming_algorithm,
                         // weight parameters
                         const std::vector<float>& e_wt_factors,
                         const std::vector<float>& v_wt_factors,

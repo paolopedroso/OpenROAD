@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -33,6 +34,7 @@
 #include "KWayPMRefine.h"
 #include "Multilevel.h"
 #include "Partitioner.h"
+#include "RetimingExtract.h"
 #include "Utilities.h"
 #include "db_sta/dbNetwork.hh"
 #include "db_sta/dbSta.hh"
@@ -52,6 +54,8 @@
 #include "sta/SearchClass.hh"
 #include "sta/Sta.hh"
 #include "sta/StringUtil.hh"
+#include "sta/TimingArc.hh"
+#include "sta/Transition.hh"
 #include "utl/Logger.h"
 
 using utl::PAR;
@@ -103,7 +107,9 @@ void TritonPart::SetTimingParams(float net_timing_factor,
                                  float path_snaking_factor,
                                  float timing_exp_factor,
                                  float extra_delay,
-                                 bool guardband_flag)
+                                 bool guardband_flag,
+                                 bool retiming_aware_flag,
+                                 const std::string& retiming_algorithm)
 {
   // the timing weight for cutting a hyperedge
   net_timing_factor_ = net_timing_factor;
@@ -117,9 +123,21 @@ void TritonPart::SetTimingParams(float net_timing_factor,
   // detailed explanation of snaking timing paths
   path_snaking_factor_ = path_snaking_factor;
 
-  timing_exp_factor_ = timing_exp_factor;  // exponential factor
-  extra_delay_ = extra_delay;              // extra delay introduced by cut
-  guardband_flag_ = guardband_flag;        // timing guardband_flag
+  timing_exp_factor_ = timing_exp_factor;      // exponential factor
+  extra_delay_ = extra_delay;                  // extra delay introduced by cut
+  guardband_flag_ = guardband_flag;            // timing guardband_flag
+  retiming_aware_flag_ = retiming_aware_flag;  // RTA-Part opt-in
+  // Validate algorithm choice: "pan" (default) or "l_s". Anything else is
+  // a user error -- error out with PAR 42 so the Tcl caller sees it.
+  if (retiming_algorithm == "pan" || retiming_algorithm == "l_s") {
+    retiming_algorithm_ = retiming_algorithm;
+  } else {
+    logger_->error(PAR,
+                   42,
+                   "RTA-Part: -retiming_algorithm must be 'pan' or 'l_s' "
+                   "(got '{}')",
+                   retiming_algorithm);
+  }
 }
 
 void TritonPart::SetFineTuneParams(
@@ -1755,6 +1773,281 @@ void TritonPart::BuildTimingPaths()
              1,
              "Reset the slack of all unconstrained hyperedges to {} seconds",
              maximum_clock_period_);
+
+  // ------------------------------------------------------------------
+  // RTA-Part Path-B seam: when retiming_aware_flag_ is set, replace the
+  // per-net and per-path slack we just filled in from static STA with
+  // values produced by the Leiserson-Saxe-style sequential-slack engine.
+  // The Hypergraph constructor, InitializeTiming, and downstream cost
+  // code are untouched -- the seam contract documented in
+  // docs/rta-part/RTA-PAR.md (§B.3) is preserved: a dimensionless slack
+  // in (-inf, 1.0], indexed by hyperedge_id, written before the
+  // Hypergraph ctor at TritonPart.cpp:1521.
+  // ------------------------------------------------------------------
+  if (retiming_aware_flag_) {
+    // Source real per-vertex and per-net delays from the OpenSTA timing
+    // graph that BuildTimingPaths already populated above. Best-effort:
+    // any vertex/net for which extraction fails leaves a 0.0 in the
+    // corresponding slot, and the adapter falls back to its placeholder
+    // (or fanout-proxy on the wire side) for those entries. This is what
+    // makes RTA-Part physically aware -- node_delay carries the cell's
+    // intrinsic gate delay and wire_delay carries the net's interconnect
+    // delay, both in seconds.
+    std::vector<double> node_delays(num_vertices_, 0.0);
+    std::vector<double> wire_delays(num_hyperedges_, 0.0);
+
+    sta::Scene* scene = sta_->cmdScene();
+    const int dcalc_ap
+        = scene ? scene->dcalcAnalysisPtIndex(sta::MinMax::max()) : -1;
+    const int lib_ap = scene ? scene->libertyIndex(sta::MinMax::max()) : -1;
+    sta::Graph* graph = sta_->graph();
+    int sourced_nodes = 0;
+    int sourced_edges = 0;
+
+    if (graph && scene && dcalc_ap >= 0 && lib_ap >= 0) {
+      // Per-instance node_delay: max intrinsic delay over input->output
+      // arcs through each instance's output pins.
+      for (auto inst : getSortedInsts(block_)) {
+        auto vid_prop = odb::dbIntProperty::find(inst, "vertex_id");
+        if (!vid_prop) {
+          continue;
+        }
+        const int vid = vid_prop->getValue();
+        if (vid < 0 || vid >= num_vertices_) {
+          continue;
+        }
+        double best = 0.0;
+        for (odb::dbITerm* iterm : inst->getITerms()) {
+          if (iterm->getIoType() != odb::dbIoType::OUTPUT) {
+            continue;
+          }
+          sta::Pin* pin = network_->dbToSta(iterm);
+          if (!pin) {
+            continue;
+          }
+          sta::Vertex* vout = graph->pinDrvrVertex(pin);
+          if (!vout) {
+            continue;
+          }
+          sta::VertexInEdgeIterator in_it(vout, graph);
+          while (in_it.hasNext()) {
+            sta::Edge* edge = in_it.next();
+            if (edge->isWire()) {
+              continue;  // intra-cell arcs only
+            }
+            const sta::TimingArcSet* arc_set = edge->timingArcSet();
+            if (!arc_set) {
+              continue;
+            }
+            for (const sta::RiseFall* rf : sta::RiseFall::range()) {
+              sta::TimingArc* arc = arc_set->arcTo(rf);
+              if (!arc) {
+                continue;
+              }
+              const sta::TimingArc* scene_arc = arc->sceneArc(lib_ap);
+              if (!scene_arc) {
+                continue;
+              }
+              const double d
+                  = sta::delayAsFloat(scene_arc->intrinsicDelay());
+              if (d > best) {
+                best = d;
+              }
+            }
+          }
+        }
+        if (best > 0.0) {
+          node_delays[vid] = best;
+          ++sourced_nodes;
+        }
+      }
+
+      // Per-net wire_delay: max wire-arc delay across driver-sink edges.
+      for (auto db_net : getSortedNets(block_)) {
+        auto hid_prop = odb::dbIntProperty::find(db_net, "hyperedge_id");
+        if (!hid_prop) {
+          continue;
+        }
+        const int hid = hid_prop->getValue();
+        if (hid < 0 || hid >= num_hyperedges_) {
+          continue;
+        }
+        sta::Net* sta_net = network_->dbToSta(db_net);
+        if (!sta_net) {
+          continue;
+        }
+        sta::PinSet* drivers = network_->drivers(sta_net);
+        if (!drivers || drivers->empty()) {
+          continue;
+        }
+        const sta::Pin* drvr_pin = *drivers->begin();
+        sta::Vertex* vdrvr = graph->pinDrvrVertex(drvr_pin);
+        if (!vdrvr) {
+          continue;
+        }
+        double best_wire = 0.0;
+        sta::VertexOutEdgeIterator out_it(vdrvr, graph);
+        while (out_it.hasNext()) {
+          sta::Edge* edge = out_it.next();
+          if (!edge->isWire()) {
+            continue;  // only wire arcs
+          }
+          const sta::TimingArcSet* arc_set = edge->timingArcSet();
+          if (!arc_set) {
+            continue;
+          }
+          for (const sta::RiseFall* rf : sta::RiseFall::range()) {
+            sta::TimingArc* arc = arc_set->arcTo(rf);
+            if (!arc) {
+              continue;
+            }
+            const double d
+                = sta::delayAsFloat(graph->arcDelay(edge, arc, dcalc_ap));
+            if (d > best_wire) {
+              best_wire = d;
+            }
+          }
+        }
+        if (best_wire > 0.0) {
+          wire_delays[hid] = best_wire;
+          ++sourced_edges;
+        }
+      }
+    }
+
+    // Pick engine.
+    const rta::RetimingAlgorithm algo
+        = (retiming_algorithm_ == "l_s")
+              ? rta::RetimingAlgorithm::kLeisersonSaxe
+              : rta::RetimingAlgorithm::kPan;
+
+    RetimingDiagnostics diag;
+    // target_period < 0 -> engine computes phi_opt and uses it as T.
+    // When node_delays are real seconds, phi_opt comes out in seconds too,
+    // and the per-hyperedge slack is in seconds; dividing by T (seconds)
+    // gives the dimensionless (-inf, 1] value the seam contract requires.
+    const std::vector<float> raw_seq_slack
+        = ComputeSequentialSlackPerHyperedge(num_vertices_,
+                                             num_hyperedges_,
+                                             hyperedges_,
+                                             vertex_types_,
+                                             node_delays,
+                                             wire_delays,
+                                             algo,
+                                             /*target_period=*/-1.0,
+                                             &diag,
+                                             logger_);
+    const double T = (diag.feasible && diag.period_used > 0.0)
+                         ? diag.period_used
+                         : 1.0;
+    // Save static slack BEFORE overwriting, for the optional diagnostic
+    // dump below (env-gated; off by default).
+    const std::vector<float> static_slacks_snapshot = hyperedge_slacks_;
+    for (int e = 0; e < num_hyperedges_; ++e) {
+      const double s = static_cast<double>(raw_seq_slack[e]) / T;
+      hyperedge_slacks_[e] = static_cast<float>(s > 1.0 ? 1.0 : s);
+    }
+    // Diagnostic dump: RTA_DIAG_DUMP_NETS=<path> writes a CSV with one
+    // row per hyperedge_id covering static vs seq slack and the resulting
+    // timing cost factor. Used by docs/rta-part/investigation_wns.md
+    // Task 3 (bug check). No-op when env unset.
+    if (const char* diag_path = std::getenv("RTA_DIAG_DUMP_NETS")) {
+      // Build vertex_id -> instance/bterm name map for the connectivity
+      // CSV that follows the slack CSV.
+      std::vector<std::string> vid_to_name(num_vertices_, "?");
+      for (auto term : getSortedBTerms(block_)) {
+        auto prop = odb::dbIntProperty::find(term, "vertex_id");
+        if (!prop) continue;
+        const int vid = prop->getValue();
+        if (vid >= 0 && vid < num_vertices_) {
+          vid_to_name[vid] = term->getName();
+        }
+      }
+      for (auto inst : getSortedInsts(block_)) {
+        auto prop = odb::dbIntProperty::find(inst, "vertex_id");
+        if (!prop) continue;
+        const int vid = prop->getValue();
+        if (vid >= 0 && vid < num_vertices_) {
+          vid_to_name[vid] = inst->getName();
+        }
+      }
+      std::ofstream csv(diag_path);
+      if (csv) {
+        csv << "hyperedge_id,static_norm_slack,raw_seq_slack_s,"
+               "rta_norm_slack,timing_cost_factor,driver,n_loads,"
+               "loads_pipe_sep\n";
+        for (int e = 0; e < num_hyperedges_; ++e) {
+          const double static_n
+              = static_cast<double>(static_slacks_snapshot[e]);
+          const double raw_seq = static_cast<double>(raw_seq_slack[e]);
+          const double rta_n = static_cast<double>(hyperedge_slacks_[e]);
+          // CalculateHyperedgeTimingCost in Evaluator.cpp:
+          //   cost = pow(1 - normalized_slack, timing_exp_factor)
+          const double cost
+              = std::pow(1.0 - rta_n, timing_exp_factor_);
+          const auto& he = hyperedges_[e];
+          std::string driver = he.empty() ? "?" : vid_to_name[he[0]];
+          std::ostringstream loads_oss;
+          int nloads = 0;
+          for (std::size_t i = 1; i < he.size(); ++i) {
+            if (nloads++) loads_oss << "|";
+            loads_oss << vid_to_name[he[i]];
+          }
+          csv << e << "," << static_n << "," << raw_seq << "," << rta_n
+              << "," << cost << "," << driver << "," << nloads << ","
+              << loads_oss.str() << "\n";
+        }
+        logger_->info(PAR,
+                      43,
+                      "RTA-Part diag dump: {} rows -> {}",
+                      num_hyperedges_,
+                      diag_path);
+      }
+    }
+    // Per-path slack: worst (minimum) per-hyperedge slack along the path's
+    // arcs. Paths with no arcs (degenerate) pin to 1.0 (unconstrained).
+    for (auto& tp : timing_paths_) {
+      if (tp.arcs.empty()) {
+        tp.slack = 1.0f;
+        continue;
+      }
+      float min_s = std::numeric_limits<float>::infinity();
+      for (const int hid : tp.arcs) {
+        if (hid >= 0 && hid < num_hyperedges_
+            && hyperedge_slacks_[hid] < min_s) {
+          min_s = hyperedge_slacks_[hid];
+        }
+      }
+      if (!std::isfinite(min_s)) {
+        min_s = 1.0f;
+      }
+      tp.slack = min_s;
+    }
+    // Re-sort paths by the new slack so downstream consumers see the same
+    // shape (sorted-by-slack) as the static path list.
+    std::ranges::sort(timing_paths_,
+                      [](const TimingPath& lhs, const TimingPath& rhs) {
+                        return std::tie(lhs.slack, lhs.path, lhs.arcs)
+                               < std::tie(rhs.slack, rhs.path, rhs.arcs);
+                      });
+    logger_->info(PAR,
+                  41,
+                  "RTA-Part: sequential slack active (algo={}, "
+                  "phi_opt={:.3e}, feasible={}, engine V={}, E={}, "
+                  "anchored={}, reg-edges={}, real-delays nodes={}/{} "
+                  "edges={}/{})",
+                  retiming_algorithm_,
+                  diag.phi_opt,
+                  diag.feasible,
+                  diag.num_engine_nodes,
+                  diag.num_engine_edges,
+                  diag.num_anchored_nodes,
+                  diag.num_register_edges,
+                  sourced_nodes,
+                  num_vertices_,
+                  sourced_edges,
+                  num_hyperedges_);
+  }
 }
 
 // Partition the hypergraph_ with the multilevel methodology
