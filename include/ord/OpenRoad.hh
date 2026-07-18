@@ -78,6 +78,10 @@ namespace gpl {
 class Replace;
 }
 
+namespace ret {
+class Retimer;
+}
+
 namespace rcx {
 class Ext;
 }
@@ -173,6 +177,7 @@ class OpenRoad
   rcx::Ext* getOpenRCX() { return extractor_; }
   drt::TritonRoute* getTritonRoute() { return detailed_router_; }
   gpl::Replace* getReplace() { return replace_; }
+  ret::Retimer* getRetimer() { return retimer_; }
   psm::PDNSim* getPDNSim() { return pdnsim_; }
   grt::GlobalRouter* getGlobalRouter() { return global_router_; }
   par::PartitionMgr* getPartitionMgr() { return partitionMgr_; }
@@ -284,6 +289,7 @@ class OpenRoad
   drt::TritonRoute* detailed_router_ = nullptr;
   ant::AntennaChecker* antenna_checker_ = nullptr;
   gpl::Replace* replace_ = nullptr;
+  ret::Retimer* retimer_ = nullptr;
   psm::PDNSim* pdnsim_ = nullptr;
   par::PartitionMgr* partitionMgr_ = nullptr;
   pdn::PdnGen* pdngen_ = nullptr;

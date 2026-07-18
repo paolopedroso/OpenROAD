@@ -47,6 +47,8 @@
 #include "fin/MakeFinale.h"
 #include "gpl/MakeReplace.h"
 #include "gpl/Replace.h"
+#include "ret/Retimer.h"
+#include "ret/MakeRetimer.h"
 #include "grt/GlobalRouter.h"
 #include "grt/MakeGlobalRouter.h"
 #include "gui/MakeGui.h"
@@ -142,6 +144,7 @@ OpenRoad::~OpenRoad()
   // for tile rendering, so it must be torn down before the DB.
   delete web_server_;
   delete replace_;
+  delete retimer_;
   delete pdnsim_;
   delete finale_;
   delete ram_gen_;
@@ -260,6 +263,7 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   drt::initGui(detailed_router_);
 
   replace_ = new gpl::Replace(db_, sta_, resizer_, global_router_, logger_);
+  retimer_ = new ret::Retimer(db_, sta_, estimate_parasitics_, logger_);
   pdnsim_ = new psm::PDNSim(logger_, db_, sta_, estimate_parasitics_, opendp_);
   pdngen_ = new pdn::PdnGen(db_, logger_);
   ram_gen_ = new ram::RamGen(getDbNetwork(),
@@ -293,6 +297,7 @@ void OpenRoad::init(Tcl_Interp* tcl_interp,
   ppl::initIoplacer(tcl_interp);
   gpl::initReplace(tcl_interp);
   gpl::initReplaceGraphics(replace_, logger_);
+  ret::initRetimer(tcl_interp);
   dpl::initOpendp(tcl_interp);
   fin::initFinale(tcl_interp);
   ram::initRamGen(tcl_interp);

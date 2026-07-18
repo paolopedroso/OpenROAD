@@ -107,6 +107,8 @@ OPENROAD_LIBRARY_DEPS = [
     "//src/ram",
     "//src/rcx",
     "//src/rcx:ui",
+    "//src/ret",
+    "//src/ret:ui",
     "//src/rmp",
     "//src/rmp:ui",
     "//src/rsz",
