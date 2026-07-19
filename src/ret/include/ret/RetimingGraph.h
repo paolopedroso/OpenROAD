@@ -17,6 +17,7 @@
 // #include "est/SteinerTree.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ret {
@@ -45,6 +46,8 @@ class RetimingGraph
     
     void AddEdge(odb::dbInst* source, RetEdge edge);
     void BuildRetimingGraph();
+    void Tunnel(odb::dbInst* source, odb::dbInst* current, \
+        int weight, std::unordered_set<odb::dbInst*>& visited);
 
     odb::dbDatabase* db_ = nullptr;
     sta::dbSta* sta_ = nullptr;
