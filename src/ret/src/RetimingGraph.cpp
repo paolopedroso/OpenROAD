@@ -6,6 +6,7 @@
 #include "odb/db.h"
 #include "utl/Logger.h"
 // STA
+#include "sta/Delay.hh"
 #include "sta/Graph.hh"
 #include "sta/Path.hh"
 #include "sta/StaMain.hh"
@@ -38,8 +39,31 @@ void RetimingGraph::AddEdge(odb::dbInst* source, RetEdge edge)
     RetimingGraph::g_[source].push_back(edge);
 }
 
+float RetimingGraph::PinArrival(odb::dbITerm* db_pin)
+{
+    sta::Pin* sta_pin = sta_->getDbNetwork()->dbToSta(db_pin);
+    sta::Vertex *vertex, *bidirect_drvr;
+    sta_->ensureGraph()->pinVertices(sta_pin, vertex, bidirect_drvr);
+    if (vertex == nullptr) {
+        return 0.0f;
+    }
+    float rise = sta::delayAsFloat(sta_->arrival(
+        vertex, sta::RiseFall::rise()->asRiseFallBoth(),
+        sta_->scenes(), sta::MinMax::max()));
+    float fall = sta::delayAsFloat(sta_->arrival(
+        vertex, sta::RiseFall::fall()->asRiseFallBoth(),
+        sta_->scenes(), sta::MinMax::max()));
+
+    return std::max(rise, fall);
+}
+
+/*
+Starts with source node and tunnels through sequential logic
+while counting how many registers there are in that path.
+*/
 void RetimingGraph::Tunnel(odb::dbInst* source, odb::dbInst* current, \
-    int weight, std::unordered_set<odb::dbInst*>& visited) {
+    int weight, std::unordered_set<odb::dbInst*>& visited) 
+{
     for (odb::dbITerm* out_pin : current->getITerms()) {
         if (out_pin->getIoType() != odb::dbIoType::OUTPUT) {
             continue;
@@ -63,7 +87,33 @@ void RetimingGraph::Tunnel(odb::dbInst* source, odb::dbInst* current, \
                 RetimingGraph::Tunnel(source, load, weight + 1, visited);
                 visited.erase(load);
             } else {
-                RetimingGraph::AddEdge(source, {load, weight, 0.0});
+                RetimingGraph::AddEdge(source, {load, weight, 0.0, out_pin, sink});
+            }
+        }
+    }
+}
+
+// 
+void RetimingGraph::ComputeDelays() 
+{
+    for (auto& [inst, edges] : g_) {
+        float node_delay = 0.0;
+        float max_input = 0.0;
+        float max_output = 0.0;
+        for (odb::dbITerm* iterm : inst->getITerms()) {
+            if (iterm->getIoType() == odb::dbIoType::INPUT) {
+                max_input = std::max(max_input, RetimingGraph::PinArrival(iterm));
+            }
+            if (iterm->getIoType() == odb::dbIoType::OUTPUT) {
+                max_output = std::max(max_output, RetimingGraph::PinArrival(iterm));
+            }
+        }
+        node_delay = max_output - max_input;
+        node_delays_[inst] = node_delay;
+        for (RetEdge& e : edges) {
+            if (e.weight == 0) {
+                e.wireDelay = RetimingGraph::PinArrival(e.sinkPin) - \
+                                RetimingGraph::PinArrival(e.driverPin);
             }
         }
     }
@@ -80,8 +130,47 @@ void RetimingGraph::BuildRetimingGraph()
         std::unordered_set<odb::dbInst*> visited;
         RetimingGraph::Tunnel(inst, inst, 0, visited);
     }
-
+    
+    //////////////////////////////////////////////
+    // Tunnel() Debug logs
     logger_->info(utl::RET, 2, "Built graph with {} source nodes.", g_.size());
+
+    int total_edges = 0;
+    int total_weights = 0;
+    int max_weight = 0;
+    for (auto& [src, edges] : g_) {
+        for (const RetEdge& e : edges) {
+            total_edges++;
+            if (e.weight >= 1) {
+                total_weights++;
+                max_weight = std::max(max_weight, e.weight);
+            }
+        }
+    }
+    logger_->info(utl::RET, 3, "Total Edges: {}", total_edges);
+    logger_->info(utl::RET, 4, "Total Weights: {}", total_weights);
+    logger_->info(utl::RET, 5, "Max Weight: {}", max_weight);
+
+    RetimingGraph::ComputeDelays();
+
+    //////////////////////////////////////////////
+    // ComputeDelays() Debug logs
+    int calculated_nodes = 0;
+    int calculated_edges = 0;
+    for (auto& [inst, delay] : node_delays_) {
+        if (delay >= 0) {
+            calculated_nodes++;
+        }
+    }
+    for (auto& [inst, edges] : g_) {
+        for (const RetEdge& e : edges) {
+            if (e.weight == 0 && e.wireDelay >= 0) {
+                calculated_edges++;
+            }
+        }
+    }
+    logger_->info(utl::RET, 6, "Calculated Node Count: {}", calculated_nodes);
+    logger_->info(utl::RET, 7, "Calculated Edge Count: {}", calculated_edges);
 }
 
 } // namespace ret

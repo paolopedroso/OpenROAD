@@ -32,6 +32,8 @@ struct RetEdge
     odb::dbInst* target;
     int weight;
     float wireDelay;
+    odb::dbITerm* driverPin;
+    odb::dbITerm* sinkPin;
 };
 
 class RetimingGraph
@@ -43,11 +45,14 @@ class RetimingGraph
                   utl::Logger* logger);
     
     std::unordered_map<odb::dbInst*, std::vector<RetEdge>> g_;
+    std::unordered_map<odb::dbInst*, float> node_delays_;
     
     void AddEdge(odb::dbInst* source, RetEdge edge);
     void BuildRetimingGraph();
     void Tunnel(odb::dbInst* source, odb::dbInst* current, \
         int weight, std::unordered_set<odb::dbInst*>& visited);
+    void ComputeDelays();
+    float PinArrival(odb::dbITerm* pin);
 
     odb::dbDatabase* db_ = nullptr;
     sta::dbSta* sta_ = nullptr;
