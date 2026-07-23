@@ -53,7 +53,19 @@ class RetimingGraph
         int weight, std::unordered_set<odb::dbInst*>& visited);
     void ComputeDelays();
     float PinArrival(odb::dbITerm* pin);
+    void GetClockPeriod();
+    
+    float clock_period_;
 
+    // MINLAG
+    std::unordered_map<odb::dbInst*, int> Lv_;
+    std::unordered_map<odb::dbInst*, int> label_;
+    std::unordered_map<odb::dbInst*, float> arrivals_;
+    void ComputeArrivals();
+    void ComputeLv();
+
+    bool RunMinLag(float phi);
+    double MinPeriod();
     odb::dbDatabase* db_ = nullptr;
     sta::dbSta* sta_ = nullptr;
     est::EstimateParasitics* estimate_parasitics_ = nullptr;

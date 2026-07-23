@@ -6,9 +6,12 @@
 #include "odb/db.h"
 #include "utl/Logger.h"
 // STA
+#include "sta/Clock.hh"
 #include "sta/Delay.hh"
 #include "sta/Graph.hh"
 #include "sta/Path.hh"
+#include "sta/Mode.hh"
+#include "sta/Sdc.hh"
 #include "sta/StaMain.hh"
 #include "sta/StaState.hh"
 #include "db_sta/dbSta.hh"
@@ -33,6 +36,17 @@ RetimingGraph::RetimingGraph(odb::dbDatabase* db,
       logger_(logger) {}
 
 // RetimingGraph::~RetimingGraph() = default;
+
+void RetimingGraph::GetClockPeriod()
+{
+    clock_period_ = 0.0;
+    for (sta::Clock* clk : sta_->cmdMode()->sdc()->clocks()) {
+        clock_period_ = std::max(clock_period_, clk->period());
+    }
+    // if (!clock_period_) {
+    //     logger_->error(utl::RET, 1, "");
+    // }
+}
 
 void RetimingGraph::AddEdge(odb::dbInst* source, RetEdge edge) 
 {
@@ -93,7 +107,11 @@ void RetimingGraph::Tunnel(odb::dbInst* source, odb::dbInst* current, \
     }
 }
 
-// 
+/*
+Computes and stores both node and interconnect delays.
+node_delays_ = max_output - max_input
+RetEdge e, e.wireDelay = e.sinkPin - e.driverPin
+*/
 void RetimingGraph::ComputeDelays() 
 {
     for (auto& [inst, edges] : g_) {
@@ -119,9 +137,114 @@ void RetimingGraph::ComputeDelays()
     }
 }
 
+/*
+Compute register distances
+*/
+void RetimingGraph::ComputeLv()
+{
+    std::unordered_map<odb::dbInst*, int> indeg;
+    for (auto& [u, edges] : g_) {
+        for (RetEdge& e : edges) {
+            indeg[e.target]++;
+        }
+    }
+    for (auto& pair : g_) {
+        odb::dbInst* u = pair.first;
+        if (indeg.count(u) == 0) {// Input Port
+            Lv_[u] = 0;
+        }
+    }
+    //Bellman-Ford
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& [u, edges] : g_) {
+            for (RetEdge& e : edges) {
+                if (Lv_.count(u) == 0) {// Input Port
+                    continue;
+                }
+                odb::dbInst* v = e.target;
+                int cand = Lv_[u] + e.weight;
+                if (Lv_.count(v) == 0 || cand < Lv_[v]) {
+                    Lv_[v] = cand;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+void RetimingGraph::ComputeArrivals() 
+{
+    arrivals_.clear();
+    for (auto& pair : Lv_) {
+        arrivals_[pair.first] = node_delays_[pair.first];
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& [u, edges] : g_) {
+            for (RetEdge& e : edges) {
+                odb::dbInst* v = e.target;
+                int w_l = e.weight + label_[v] - label_[u];
+                if (w_l != 0) { // Only combinational nodes
+                    continue;
+                }
+                float cand = arrivals_[u] + e.wireDelay + node_delays_[v];
+                if (cand > arrivals_[v]) {
+                    arrivals_[v] = cand;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+bool RetimingGraph::RunMinLag(float phi) 
+{
+    for (auto& [v, lv] : Lv_) {
+        label_[v] = -lv;
+    }
+    int n = Lv_.size();
+    for (int i = 0; i < n; i++) {
+        RetimingGraph::ComputeArrivals(); // Fill arrival_
+        bool feasible = true;
+        for (auto& [v, av] : arrivals_) {
+            if (av > phi) {
+                label_[v] += 1;
+                feasible = false;
+            }
+        }
+        if (feasible) {
+            logger_->info(utl::RET, 10, "MINLAG SUCCESS at phi={} in {} iterations", phi, i);
+            return true;
+        }
+    }
+    logger_->info(utl::RET, 11, "MINLAG FAILURE: phi={} infeasible", phi);
+    return false;
+}
+
+double RetimingGraph::MinPeriod()
+{
+    double lo = 0.0;
+    double hi = RetimingGraph::clock_period_;
+    double eps = 1e-12;
+    while (hi - lo > eps) {
+        double mid = (lo + hi) / 2.0;
+        if (RetimingGraph::RunMinLag(mid)) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    return hi;    
+}
+
 void RetimingGraph::BuildRetimingGraph() 
 {
     auto block = db_->getChip()->getBlock(); // whole netlist
+    RetimingGraph::GetClockPeriod();
+    logger_->info(utl::RET, 12, "Max Clock Period: {}", clock_period_);
     
     for (auto inst : block->getInsts()) {
         if (inst->getMaster()->isSequential()) {
@@ -171,6 +294,26 @@ void RetimingGraph::BuildRetimingGraph()
     }
     logger_->info(utl::RET, 6, "Calculated Node Count: {}", calculated_nodes);
     logger_->info(utl::RET, 7, "Calculated Edge Count: {}", calculated_edges);
+
+    RetimingGraph::ComputeLv();
+
+    //////////////////////////////////////////////
+    // ComputeLv() Debug logs    
+    logger_->info(utl::RET, 8, "Found {} distinct nodes.", Lv_.size()); 
+
+    RetimingGraph::ComputeArrivals();
+    
+    //////////////////////////////////////////////
+    // ComputeArrivals() Debug logs    
+    logger_->info(utl::RET, 9, "arrivals_.size(): {}.", arrivals_.size()); 
+
+    double min_period = RetimingGraph::MinPeriod();
+
+    //////////////////////////////////////////////
+    // MinPeriod() Debug logs       
+    logger_->info(utl::RET, 13, "Calculated MinPeriod: {}.", min_period); 
+
+
 }
 
 } // namespace ret
